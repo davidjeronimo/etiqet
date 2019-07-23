@@ -4,6 +4,7 @@ import com.neueda.etiqet.core.client.delegate.SinkClientDelegate;
 import com.neueda.etiqet.core.json.JsonCodec;
 import com.neueda.etiqet.core.message.CdrBuilder;
 import com.neueda.etiqet.core.message.cdr.Cdr;
+import com.neueda.etiqet.core.transport.delegate.StringBinaryMessageConverterDelegate;
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.junit.EmbeddedActiveMQBroker;
 import org.junit.*;
@@ -28,8 +29,10 @@ public class JmsTransportIntegrationTest {
         ConnectionFactory connectionFactory = new ActiveMQConnectionFactory("vm://localhost?broker.persistent=false");
         jmsTransport = new JmsTransport();
         jmsTransport.setCodec(new JsonCodec());
+        jmsTransport.setBinaryMessageConverterDelegate(new StringBinaryMessageConverterDelegate());
         jmsTransport.setConnectionFactory(connectionFactory);
         jmsTransport.setDelegate(new SinkClientDelegate());
+        //jmsTransport.init("");
         jmsTransport.start();
     }
 

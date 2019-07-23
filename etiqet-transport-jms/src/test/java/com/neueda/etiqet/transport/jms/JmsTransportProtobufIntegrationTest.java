@@ -78,8 +78,9 @@ public class JmsTransportProtobufIntegrationTest {
 
         jmsTransport.subscribeToTopic(Optional.of(topicName), receivedMessages::add);
         jmsTransport.sendToTopic(cdr, Optional.of(topicName));
-        Thread.sleep(200);
+        Thread.sleep(2000);
 
+        //jmsTransport.stop();
         Cdr received = receivedMessages.poll(5, TimeUnit.SECONDS);
         assertNotNull(received);
         Map<String, CdrItem> values = received.getItems();
@@ -99,9 +100,11 @@ public class JmsTransportProtobufIntegrationTest {
             .withField("id", 34)
             .withField("email", "aaa@aaa.aaa")
             .build();
+        Thread.sleep(1000);
 
         jmsTransport.subscribeToTopic(Optional.of(topicName), receivedMessages::add);
         jmsTransport.sendToTopic(cdr, Optional.of(topicName));
+
 
         Cdr received = receivedMessages.poll(5, TimeUnit.SECONDS);
         assertNotNull(received);

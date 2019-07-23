@@ -23,18 +23,22 @@ public class JmsConfigExtractor {
     public JmsConfig retrieveConfiguration(final String configPath) throws EtiqetException {
 
         final JmsConfiguration jmsConfiguration = jmsConfigXmlParser.parse(configPath, JmsConfiguration.class);
+        return transformConfiguration(jmsConfiguration);
+    }
+
+    public JmsConfig transformConfiguration(final JmsConfiguration xmlConfiguration)  throws EtiqetException {
         final Class<?> constructorClass;
         try {
-            constructorClass = Class.forName(jmsConfiguration.getImplementation());
+            constructorClass = Class.forName(xmlConfiguration.getImplementation());
         } catch (ReflectiveOperationException e) {
             throw new EtiqetException(e);
         }
         return new JmsConfig(
             constructorClass,
-            constructorArguments(jmsConfiguration.getConstructorArgs()),
-            setterArguments(jmsConfiguration.getProperties()),
-            jmsConfiguration.getDefaultTopic(),
-            binaryMessageConverterDelegateClass(jmsConfiguration)
+            constructorArguments(xmlConfiguration.getConstructorArgs()),
+            setterArguments(xmlConfiguration.getProperties()),
+            xmlConfiguration.getDefaultTopic(),
+            binaryMessageConverterDelegateClass(xmlConfiguration)
         );
     }
 

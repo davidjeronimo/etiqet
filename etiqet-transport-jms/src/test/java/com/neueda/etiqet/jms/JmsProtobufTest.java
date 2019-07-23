@@ -11,7 +11,7 @@ import org.junit.runner.RunWith;
  * Disabled temporarily since two EtiqetTestRunners cannot run properly in the same module. Fix still needed
  */
 
-//@RunWith(EtiqetTestRunner.class)
+@RunWith(EtiqetTestRunner.class)
 @EtiqetOptions(
     configFile = "src/test/resources/config/protobuf/etiqet.protobuf.config.xml",
     plugin = {"pretty", "html:target/cucumber"},

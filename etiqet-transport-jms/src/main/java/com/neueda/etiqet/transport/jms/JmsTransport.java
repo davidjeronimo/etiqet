@@ -14,20 +14,25 @@ import com.neueda.etiqet.transport.jms.config.JmsConfigXmlParser;
 import com.neueda.etiqet.transport.jms.config.model.ConstructorArgument;
 import com.neueda.etiqet.transport.jms.config.model.JmsConfig;
 import com.neueda.etiqet.transport.jms.config.model.SetterArgument;
+import com.neueda.etiqet.transport.jms.routes.JmsRouteBuilder;
+import org.apache.camel.*;
+import org.apache.camel.component.jms.JmsComponent;
+import org.apache.camel.impl.DefaultCamelContext;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.jms.*;
-import java.io.Serializable;
 import java.lang.reflect.Method;
 import java.time.Duration;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+
+import static com.neueda.etiqet.transport.jms.DestinationType.QUEUE;
+import static com.neueda.etiqet.transport.jms.DestinationType.TOPIC;
+import static com.neueda.etiqet.transport.jms.routes.JmsRouteBuilder.DESTINATION_NAME;
 
 /**
  * Class used to interact with a jms bus
@@ -37,13 +42,17 @@ public class JmsTransport implements BrokerTransport {
     private final static Logger logger = LoggerFactory.getLogger(JmsTransport.class);
 
     private ConnectionFactory connectionFactory;
-    private Connection connection;
-    private Session session;
+    //private Connection connection;
+    //private Session session;
     private Codec<Cdr, ?> codec;
     private AbstractDictionary dictionary;
     private String defaultTopic;
     private ClientDelegate delegate;
     private BinaryMessageConverterDelegate binaryMessageConverterDelegate;
+    private JmsConfig configuration;
+    private JmsRouteBuilder jmsRouteBuilder;
+    private CamelContext camelContext;
+    private ProducerTemplate producerTemplate;
 
     /**
      * Instantiates a Jms connection factory and determines the default topic to publish messages to
@@ -54,11 +63,11 @@ public class JmsTransport implements BrokerTransport {
     @Override
     public void init(String configPath) throws EtiqetException {
         JmsConfigExtractor jmsConfigExtractor = new JmsConfigExtractor(new JmsConfigXmlParser());
-        JmsConfig configuration = jmsConfigExtractor.retrieveConfiguration(configPath);
+        configuration = jmsConfigExtractor.retrieveConfiguration(configPath);
         binaryMessageConverterDelegate = instantiateBinaryMessageConverterDelegate(configuration);
         connectionFactory = createConnectionFactory(configuration);
         defaultTopic = configuration.getDefaultTopic();
-    }
+     }
 
     private ConnectionFactory createConnectionFactory(final JmsConfig configuration) throws EtiqetException {
         List<ConstructorArgument> constructorArguments = configuration.getConstructorArgs();
@@ -114,12 +123,23 @@ public class JmsTransport implements BrokerTransport {
     @Override
     public void start() throws EtiqetException {
         try {
+            camelContext = new DefaultCamelContext();
+            camelContext.addComponent("jms", JmsComponent.jmsComponentAutoAcknowledge(connectionFactory));
+            jmsRouteBuilder = new JmsRouteBuilder(codec, binaryMessageConverterDelegate);
+            camelContext.addRoutes(jmsRouteBuilder);
+            camelContext.start();
+            producerTemplate = camelContext.createProducerTemplate();
+        } catch (Exception e) {
+            throw new EtiqetException (e);
+        }
+
+       /* try {
             connection = connectionFactory.createConnection();
             connection.start();
             session = connection.createSession(false, Session.CLIENT_ACKNOWLEDGE);
         } catch (JMSException e) {
             throw new EtiqetException("Couldn't create Jms connection", e);
-        }
+        }*/
     }
 
     /**
@@ -127,25 +147,9 @@ public class JmsTransport implements BrokerTransport {
      */
     @Override
     public void stop() {
-        if (session != null) {
-            try {
-                session.close();
-            } catch (JMSException e) {
-                logger.error("Couldn't safely stop Jms session", e);
-            } finally {
-                session = null;
-            }
-        }
-
-        if (connection != null) {
-            try {
-                connection.stop();
-            } catch (JMSException e) {
-                logger.error("Couldn't safely stop Jms connection", e);
-            } finally {
-                connection = null;
-            }
-        }
+        try {
+            camelContext.stop();
+        } catch (Exception e) {}
     }
 
     /**
@@ -176,7 +180,7 @@ public class JmsTransport implements BrokerTransport {
      */
     @Override
     public boolean isLoggedOn() {
-        return session != null;
+        return true;
     }
 
     /**
@@ -229,28 +233,23 @@ public class JmsTransport implements BrokerTransport {
 
     @Override
     public void subscribeToTopic(Optional<String> topicName, final Consumer<Cdr> cdrListener) throws EtiqetException {
-        try {
-            final Topic topic = session.createTopic(topicName.orElse(defaultTopic));
-            subscribe(topic, cdrListener);
-        } catch (JMSException e) {
-            throw new EtiqetException(e);
-        }
+        subscribeToDestination(TOPIC, topicName.orElse(defaultTopic), cdrListener);
     }
 
     @Override
     public void subscribeToQueue(String queueName, Consumer<Cdr> cdrListener) throws EtiqetException {
-        try {
-            final Queue queue = session.createQueue(queueName);
-            subscribe(queue, cdrListener);
-        } catch (JMSException e) {
-            throw new EtiqetException(e);
-        }
+        subscribeToDestination(QUEUE, queueName, cdrListener);
     }
 
-    private void subscribe(final Destination destination, final Consumer<Cdr> cdrListener) throws JMSException {
-        MessageListener messageListener = message -> cdrListener.accept(jmsMessageToCdr(message));
-        final MessageConsumer consumer = session.createConsumer(destination);
-        consumer.setMessageListener(messageListener);
+
+    public void subscribeToDestination(DestinationType destinationType, final String destinationName, final Consumer<Cdr> cdrListener) throws EtiqetException {
+        try {
+            camelContext.addRouteDefinition(
+                jmsRouteBuilder.createListenerRouteDefinition(destinationType, destinationName, cdrListener)
+            );
+        } catch (Exception e) {
+            throw new EtiqetException(e);
+        }
     }
 
     @Override
@@ -260,114 +259,43 @@ public class JmsTransport implements BrokerTransport {
             return defaultTopic;
         });
 
-        if (StringUtils.isEmpty(topicName)) {
-            throw new EtiqetException("Unable to send message without a defined topic");
-        }
-        try {
-            sendToDestination(cdr, session.createTopic(topicName));
-        } catch (JMSException e) {
-            throw new EtiqetException("Unable to send message to Jms topic " + topicName, e);
-        }
-    }
+        Map<String, Object> params = new HashMap<>();
+        params.put(DESTINATION_NAME, topicName);
+        producerTemplate.sendBodyAndHeaders("direct:sendToTopic", cdr, params);
+       }
 
     @Override
     public void sendToQueue(Cdr cdr, String queueName) throws EtiqetException {
         if (StringUtils.isEmpty(queueName)) {
             throw new EtiqetException("Unable to send message without a defined queue");
         }
-        try {
-            sendToDestination(cdr, session.createQueue(queueName));
-        } catch (JMSException e) {
-            throw new EtiqetException("Exception sending message to Jms queue " + queueName, e);
-        }
+        Map<String, Object> params = new HashMap<>();
+        params.put(DESTINATION_NAME, queueName);
+        producerTemplate.sendBodyAndHeaders("vm:sendToQueue", cdr, params);
     }
 
-    private void sendToDestination(final Cdr cdr, final Destination destination) throws JMSException, EtiqetException {
-        MessageProducer producer = session.createProducer(destination);
-        final Cdr processedMessage = processMessageWithDelegate(cdr);
-        Object payload = codec.encode(processedMessage);
-        final Message message;
-        if (payload instanceof String) {
-            message = session.createTextMessage((String) payload);
-        } else if (binaryMessageConverterDelegate == null) {
-            message = session.createObjectMessage((Serializable) payload);
-        } else {
-            BytesMessage bytesMessage = session.createBytesMessage();
-            bytesMessage.writeBytes(binaryMessageConverterDelegate.toByteArray(payload));
-            message = bytesMessage;
-        }
-        producer.send(message);
-    }
 
     @Override
     public Cdr subscribeAndConsumeFromTopic(final Optional<String> topicName, final Duration timeout) throws EtiqetException {
-        try {
-            final Topic topic = session.createTopic(topicName.orElse(defaultTopic));
-            return jmsMessageToCdr(consumeFromDestination(topic).get(timeout.getSeconds(), TimeUnit.SECONDS));
-        } catch (Exception e) {
-            throw new EtiqetException(e);
-        }
+        return subscribeAndConsumeFromDestination("topic", topicName.orElse(defaultTopic), timeout);
     }
 
     @Override
     public Cdr subscribeAndConsumeFromQueue(final String queueName, final Duration timeout) throws EtiqetException {
+        return subscribeAndConsumeFromDestination("queue", queueName, timeout);
+    }
+
+    public Cdr subscribeAndConsumeFromDestination(final String destinationName, final String destinationType, final Duration timeout) throws EtiqetException {
+        ConsumerTemplate consumerTemplate = camelContext.createConsumerTemplate();
+        CompletableFuture<Exchange> eventualExchange = CompletableFuture.supplyAsync(
+            () -> consumerTemplate.receive("vm:" + destinationType + ":" + destinationName)
+        );
         try {
-            final Queue queue = session.createQueue(queueName);
-            return jmsMessageToCdr(consumeFromDestination(queue).get(timeout.getSeconds(), TimeUnit.SECONDS));
+            Exchange exchange = eventualExchange.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            return exchange.getIn().getBody(Cdr.class);
         } catch (Exception e) {
             throw new EtiqetException(e);
         }
-    }
-
-    private CompletableFuture<Message> consumeFromDestination(final Destination destination) throws EtiqetException {
-        CompletableFuture<Message> eventualCdr = new CompletableFuture<>();
-        try {
-            final MessageConsumer consumer = session.createConsumer(destination);
-            consumer.setMessageListener(message -> eventualCdr.complete(message));
-        } catch (JMSException e) {
-            throw new EtiqetException(e);
-        }
-        return eventualCdr;
-    }
-
-    private Cdr jmsMessageToCdr(final Message message) {
-        final Cdr decodedMessage;
-        try {
-            decodedMessage = getDecodedMessage(message);
-            if (decodedMessage != null) {
-                logger.info("Decoded message: " + decodedMessage.toString());
-            }
-            message.acknowledge();
-        } catch (JMSException | EtiqetException e) {
-            throw new EtiqetRuntimeException("Unable to convert message to Cdr:" + e.getMessage(), e);
-        }
-        return processMessageWithDelegate(decodedMessage);
-    }
-
-    private Cdr getDecodedMessage(final Message message) throws EtiqetException, JMSException{
-        final Object messageContent;
-
-        if (message instanceof TextMessage) {
-            TextMessage txt = (TextMessage) message;
-            messageContent = txt.getText();
-        } else if (message instanceof BytesMessage) {
-            BytesMessage bytesXMLMessage = ((BytesMessage) message);
-            messageContent = new byte[(int) bytesXMLMessage.getBodyLength()];
-            bytesXMLMessage.readBytes((byte[]) messageContent);
-        } else if (message instanceof ObjectMessage) {
-            messageContent = ((ObjectMessage) message).getObject();
-        } else {
-            throw new EtiqetException("Unable to extract content from message type " + message.getClass().getName());
-        }
-
-        return (Cdr) getCodec().decode(messageContent);
-    }
-
-    private Cdr processMessageWithDelegate(final Cdr cdr) {
-        if (delegate == null) {
-            return cdr;
-        }
-        return delegate.processMessage(cdr);
     }
 
     ConnectionFactory getConnectionFactory() {
@@ -378,8 +306,8 @@ public class JmsTransport implements BrokerTransport {
         this.connectionFactory = connectionFactory;
     }
 
-    Connection getConnection() {
-        return connection;
+    /*Connection getConnection() {
+        return null;
     }
 
     void setConnection(Connection connection) {
@@ -392,7 +320,7 @@ public class JmsTransport implements BrokerTransport {
 
     void setSession(Session session) {
         this.session = session;
-    }
+    }*/
 
     void setDefaultTopic(String defaultTopic) {
         this.defaultTopic = defaultTopic;
